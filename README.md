@@ -23,6 +23,8 @@ GET http://localhost:4000/health
 
 - `POST /api/auth/register`
 - `POST /api/auth/login`
+- `POST /api/auth/forgot-password`
+- `POST /api/auth/reset-password`
 - `GET /api/auth/me`
 - `GET /api/businesses`
 - `POST /api/businesses`

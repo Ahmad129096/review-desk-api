@@ -17,21 +17,29 @@ export function createApp() {
   app.use(helmet());
   app.use(
     cors({
-      origin: env.WEB_APP_URL,
-      credentials: true
-    })
+      origin: "*",
+      credentials: true,
+    }),
   );
   app.use(
     rateLimit({
       windowMs: 60_000,
-      limit: 120
-    })
+      limit: 120,
+    }),
   );
   app.get("/health", (_req, res) => {
-    res.json({ ok: true, service: "reviewdesk-api", time: new Date().toISOString() });
+    res.json({
+      ok: true,
+      service: "reviewdesk-api",
+      time: new Date().toISOString(),
+    });
   });
 
-  app.use("/api/webhooks/stripe", express.raw({ type: "application/json" }), stripeWebhookRoutes);
+  app.use(
+    "/api/webhooks/stripe",
+    express.raw({ type: "application/json" }),
+    stripeWebhookRoutes,
+  );
   app.use(express.json({ limit: "1mb" }));
 
   app.use("/api/auth", authRoutes);
