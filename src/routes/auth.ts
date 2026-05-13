@@ -1,5 +1,5 @@
 import { Router } from "express";
-import crypto from "node:crypto";
+import crypto, { hash } from "node:crypto";
 import jwt from "jsonwebtoken";
 import type { SignOptions } from "jsonwebtoken";
 import { z } from "zod";
@@ -9,7 +9,11 @@ import { prisma } from "../lib/prisma.js";
 import { requireAuth } from "../middleware/auth.js";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { HttpError } from "../utils/httpError.js";
-import { sendEmail, createPasswordResetEmailHtml } from "../services/email.js";
+import {
+  sendEmail,
+  createPasswordResetEmailHtml,
+  createEmailVerificationEmailHtml,
+} from "../services/email.js";
 
 export const authRoutes = Router();
 
@@ -68,6 +72,12 @@ function createPasswordResetUrl(token: string) {
   return resetUrl.toString();
 }
 
+function createEmailVerificationUrl(token: string) {
+  const verificationUrl = new URL("/verify-email", env.WEB_APP_URL);
+  verificationUrl.searchParams.set("token", token);
+  return verificationUrl.toString();
+}
+
 authRoutes.post(
   "/register",
   asyncHandler(async (req, res) => {
@@ -92,10 +102,49 @@ authRoutes.post(
           },
         },
       },
-      select: { id: true, name: true, email: true, role: true },
+      select: { id: true, name: true, email: true },
     });
 
-    res.status(201).json({ user, token: createToken(user.id) });
+    // Create email verification token
+    const verificationToken = createPasswordResetToken(); // Reuse the token generation logic
+    const verificationUrl = createEmailVerificationUrl(verificationToken);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000); // 24 hours
+
+    await prisma.emailVerificationToken.create({
+      data: {
+        userId: user.id,
+        tokenHash: hashPasswordResetToken(verificationToken),
+        expiresAt,
+      },
+    });
+
+    // Send verification email
+    try {
+      const emailHtml = createEmailVerificationEmailHtml(
+        verificationUrl,
+        user.name,
+      );
+      await sendEmail({
+        to: user.email,
+        subject: "Verify your ReviewDesk email",
+        html: emailHtml,
+      });
+    } catch (error) {
+      console.error("Failed to send verification email:", error);
+      // Continue anyway, user can request resend
+    }
+
+    if (env.NODE_ENV !== "production") {
+      console.log(
+        `Email verification link for ${user.email}: ${verificationUrl}`,
+      );
+    }
+
+    res.status(201).json({
+      message:
+        "Account created successfully. Please check your email to verify your account.",
+      user: { id: user.id, name: user.name, email: user.email },
+    });
   }),
 );
 
@@ -109,6 +158,13 @@ authRoutes.post(
 
     if (!user || !(await verifyPassword(input.password, user.passwordHash))) {
       throw new HttpError(401, "Invalid email or password");
+    }
+
+    if (!user.emailVerified) {
+      throw new HttpError(
+        403,
+        "Please verify your email address to login. Check your inbox for the verification link.",
+      );
     }
 
     res.json({
@@ -253,6 +309,46 @@ authRoutes.get(
     }
 
     res.json({ valid: true, message: "Token is valid" });
+  }),
+);
+
+authRoutes.get(
+  "/verify-email/:token",
+  asyncHandler(async (req, res) => {
+    const { token } = req.params;
+    const tokenHash = hashPasswordResetToken(token);
+    const verificationToken = await prisma.emailVerificationToken.findFirst({
+      where: {
+        tokenHash,
+        verifiedAt: null,
+        expiresAt: { gt: new Date() },
+      },
+      select: { id: true, userId: true },
+    });
+    console.log({ verificationToken, hash: tokenHash });
+
+    if (!verificationToken) {
+      throw new HttpError(
+        400,
+        "Email verification token is invalid or expired",
+      );
+    }
+
+    // Mark email as verified and mark token as used
+    await prisma.$transaction([
+      prisma.user.update({
+        where: { id: verificationToken.userId },
+        data: { emailVerified: true },
+      }),
+      prisma.emailVerificationToken.update({
+        where: { id: verificationToken.id },
+        data: { verifiedAt: new Date() },
+      }),
+    ]);
+
+    res.json({
+      message: "Email verified successfully! You can now login.",
+    });
   }),
 );
 
